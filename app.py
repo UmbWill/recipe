@@ -1,33 +1,53 @@
+import io
+import base64
 import datetime
 import uuid
 import json
 import requests
+import sqlite3
 import time
 from multiprocessing import Process
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify, make_response, g, send_file
+from flask_cors import CORS
 from common.extensions import cache
 import factory_solver as fs
 import validations
 
 app = Flask(__name__)
+CORS(app)
 app.config.from_object('config.BaseConfig')
 cache.init_app(app)
 
 TIMEOUT_HEARTBEAT_SOLVER = 100
+DATABASE = './recipes_db.db'
 
-@app.route('/post_instance', methods=['POST'])
-def post_instance():
-    '''public: post instance
+def get_db():
+    db = getattr(g, '_database', None)
+    if db is None:
+        db = g._database = sqlite3.connect(DATABASE)
+    return db
+
+@app.teardown_appcontext
+def close_connection(exception):
+    db = getattr(g, '_database', None)
+    if db is not None:
+        db.close()
+
+@app.route('/recipe', methods=['POST'])
+def recipe():
+    '''public: post recipe
     
     Request Args POST:
         -json:
-        {"type": string,
-         "instance_data": json
+        {"name" : string,
+         "description": string,
+         "time_cook": string,
+         "time_preparation": string,
+         "howto_prepare": string
         }
 
     Returns:
         -Success/200:
-            {"instance_key":string}
 
         -Not valid post data:
             Error 400.
@@ -55,40 +75,16 @@ def post_instance():
                "status": "405",
                "message": "Error 405 Method Not Allowed"}), 405)
 
-@app.route('/solver_request', methods=['GET', 'POST'])
-def solver_request():
-    '''public: solver request
+@app.route('/recipe_image', methods=['GET'])
+def recipe_image():
+    '''public: recipe_image
     
-    Request Args POST:
-        -json:
-        {
-            "instance_key": json,
-            "solver": string,
-            "parameters": json
-        }
-
     Request Args GET:
-        -result_key: string
+        -id: recipe id
 
     Returns:
-        -POST Success/200:
-            {"result_key":string}
-
         -GET Success/200:
-            -SUCCESS:
-                {
-                    "status":string,
-                    "result":object
-                }
-            -FAILED:
-                {
-                    "status":string,
-                    "message":string
-                }
-            -PENDING:
-                {
-                    "status":string
-                }
+            - return recipe image if something found
 
         -Not valid post data:
             Error 400.
@@ -99,92 +95,150 @@ def solver_request():
         -Not valid method:
             Error 405
     '''
-    if request.method == 'POST':
-        json_solver_request = request.json
-        if not _validation(json_solver_request):
+    print(request.method, flush=True)
+    if request.method == 'GET':
+        json_recipe_id_request = request.args
+        print(json_recipe_id_request, flush=True)
+        redis_image_key = uuid.uuid3(uuid.NAMESPACE_X500, json.dumps(json_recipe_id_request))
+        cached_data = cache.get(str(redis_image_key))
+        if cached_data != None:
+            print("Found cache", flush=True)
+            return send_file(
+            io.BytesIO(cached_data),
+            mimetype='image/jpeg',
+            as_attachment=True,
+            download_name='%s.jpg' % json_recipe_id_request["recipe_id"])    
+        
+        sql, args = createSqlQueryImage(json_recipe_id_request)
+        print(sql, flush=True)
+        print(args, flush=True)
+        query_result = query_db(sql, args)
+        if query_result == None:
             return make_response(jsonify({
                 "status": "400",
                 "message": "Not a valid solver request."}), 400)
-        return _create_post_sr_response(json_solver_request)
-    elif request.method == 'GET':
-        return _create_get_sr_response()
-    else:
-        return make_response(jsonify({
-               "status": "405",
-               "message": "Error 405 Method Not Allowed"}), 405)
-
-@app.route('/mock_pending', methods=['POST'])
-def mock_pending():
-    '''public: mock endopint for switch the status of a solver request to PENDING.'''
-
-    if request.method == 'POST':
-        result_key = request.json.get("result_key")
-        cached_data = cache.get(str(result_key)) 
-        cached_data["status"] = "PENDING"
-        cache.set(str(result_key), cached_data)
+        print("query result : ", flush=True)
+        print(query_result[0].keys(), flush=True)
+        keys = query_result[0].keys()
+        # send_file download image 
+        cache.set(str(redis_image_key), query_result[0]['image'])
+        return send_file(
+            io.BytesIO(query_result[0]['image']),
+            mimetype='image/jpeg',
+            as_attachment=True,
+            download_name='%s.jpg' % json_recipe_id_request["recipe_id"])
+        img_byte_arr = io.BytesIO(query_result[0]['image'])
+        encoded_image = base64.encodebytes(img_byte_arr.getvalue()).decode('ascii')
         return make_response(jsonify({
                 "status": "200",
-                "message": "Set status to pending."}), 200)
+                "ImageBytes": encoded_image}), 200)
     else:
         return make_response(jsonify({
                "status": "405",
                "message": "Error 405 Method Not Allowed"}), 405)
 
-def _validation(json_solver_request):
-    '''private: validation solver request.'''
-
-    if json_solver_request["instance_key"] == None or \
-       json_solver_request["solver"] == None or \
-       json_solver_request["parameters"] == None or \
-       not validations._validation_solver(json_solver_request["solver"]):
-        return False
-    return True
-
-def _create_post_sr_response(json_solver_request):
-    '''private: create solver request for a POST request.'''
-
-    fact_solver = fs.FactorySolver()
-    result_key = uuid.uuid3(uuid.NAMESPACE_X500, json.dumps(json_solver_request))
-    cached_data = cache.get(str(result_key))
-    fact_solver.set_parameters(result_key, cached_data)
-    if cached_data == None:
-        #call solver
-        fact_solver.set_parameters(result_key, json_solver_request)
-        fact_solver.solver()
-    elif cached_data["status"] == "FAILED":
-        #call solver
-        fact_solver.solver()
-    elif cached_data["status"] == "PENDING":
-        cur_time = int(datetime.datetime.now().timestamp())
-        if cur_time - cached_data["heartbeat"] > TIMEOUT_HEARTBEAT_SOLVER:
-            fact_solver.solver()
-    return make_response(jsonify({"result_key":str(result_key)}), 200)
-
-def _create_get_sr_response():
-    '''private: create solver request for a GET request.'''
+@app.route('/recipes_list', methods=['GET'])
+def recipes_list():
+    '''public: recipes_list
     
-    result_key = request.args.get("result_key")
-    cached_data = cache.get(str(result_key)) 
-    if cached_data == None:
+    Request Args GET:
+        -ingredients: query string
+
+    Returns:
+        -GET Success/200:
+            - return recipes if something found
+
+        -Not valid post data:
+            Error 400.
+        
+        -Not valid get data:
+            Error 400.
+        
+        -Not valid method:
+            Error 405
+    '''
+    print(request.method, flush=True)
+    if request.method == 'GET':
+        json_recipe_list_request = request.args
+        print(json_recipe_list_request, flush=True)
+        redis_recipe_list_key = uuid.uuid3(uuid.NAMESPACE_X500, json.dumps(json_recipe_list_request))
+        cached_data = cache.get(str(redis_recipe_list_key))
+        
+        if cached_data != None:
+            print("Find cache", flush=True)
+            return make_response(jsonify({
+                "status": "200",
+                "message": cached_data}), 200)
+        
+        sql, args = createSqlQuery(json_recipe_list_request)
+        print(sql, flush=True)
+        print(args, flush=True)
+        query_result = query_db(sql, args)
+        if query_result == None:
+            return make_response(jsonify({
+                "status": "400",
+                "message": "Not a valid solver request."}), 400)
+        print("type query result : ", flush=True)
+        print(query_result, flush=True)
+        cache.set(str(redis_recipe_list_key), query_result)
         return make_response(jsonify({
-            "status": "400",
-            "message": "Not a valid result key."}), 400)
-    status = cached_data["status"]
-    if status == "PENDING":
-        return make_response(jsonify({
-                "status": status}), 200)
-    elif status == "FAILED":
-        return make_response(jsonify({
-                "status": status,
-                "message": cached_data["message"]}), 200)
-    elif status == "SUCCESS":
-        return make_response(jsonify({
-                "status": status,
-                "result": cached_data["result"]}), 200)
+                "status": "200",
+                "message": query_result}), 200)
     else:
         return make_response(jsonify({
-                "status": "400",
-                "message": "Bad Request."}), 400)
+               "status": "405",
+               "message": "Error 405 Method Not Allowed"}), 405)
+
+def query_db(query, args=(), one=False):
+    cur = get_db().execute(query, args)
+    #rv = cur.fetchall()
+    rv = [dict((cur.description[i][0], value) \
+               for i, value in enumerate(row)) for row in cur.fetchall()]
+    cur.close()
+    return (rv[0] if rv else None) if one else rv
+
+def createSqlQueryImage(recipe_id):
+    args = []
+    sql = "select image from recipe_image where recipe_id = ?;"
+    args.append(recipe_id["recipe_id"])
+    return (sql, args)
+
+def createSqlQuery(json_data):
+    cnt_courses = 0
+    cnt_ingredients = 0
+    args = []
+    sql_courses = ""
+    sql_ingredients = ""
+    sql = "select * from recipe where"
+    print("json_Data", flush=True)
+    print(json_data, flush=True)
+    for key in json_data:
+        print((key, json_data[key]), flush=True)
+        if key == 'course':
+            courses = json_data[key].split(',')
+            sql_courses += ' course = ? '
+            cnt_courses = len(courses)
+            sql_courses += " OR course = ? " * (cnt_courses-1)
+            args.extend(courses)
+        else:
+            if json_data[key] == "true":
+                if cnt_ingredients > 0:
+                    sql_ingredients += " AND "
+                cnt_ingredients+=1
+                sql_ingredients += ' ingredient_name = ? '
+                args.append(key)
+    if cnt_courses > 0:
+        sql += sql_courses
+    if cnt_ingredients > 0:
+        if cnt_courses > 0:
+            sql += " AND "
+        sql += "id in\
+        (SELECT recipe_id from ingredients_recipes WHERE "
+        sql += sql_ingredients 
+        sql += ');'
+    return (sql, args)
+
+
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)

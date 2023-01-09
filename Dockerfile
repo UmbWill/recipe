@@ -1,5 +1,5 @@
 FROM python:3.10
-WORKDIR /tsp_solver
-copy requirements.txt /tsp_solver
+WORKDIR /recipe-backend
+copy requirements.txt /recipe-backend
 RUN pip3 install -r requirements.txt --no-cache-dir
 COPY . .

@@ -25,7 +25,7 @@ class FactorySolver:
     
     @fire_and_forget
     def solver(self):
-        cur_solver = self._get_solver(self.json_solver_request["solver"])
+        cur_solver = self._get_solver(self.json_solver_request["solver"]) #JijSASampler
         cur_solver()
 
     def _get_solver(self, solver_type):
@@ -97,21 +97,30 @@ class FactorySolver:
     def _mock_solver(self):
         '''Mock solver for test.'''
 
-        self._set_KV_value("PENDING", "No errors", None)
-        cache.set(str(self.result_key), self.json_solver_request)
-        #delay for PENDING test
-        for i in range(10):
-            time.sleep(1)
-            self.json_solver_request["heartbeat"] = int(datetime.datetime.now().timestamp()) 
+        try:
+            self._set_KV_value("PENDING", "No errors", None)
             cache.set(str(self.result_key), self.json_solver_request)
+            #delay for PENDING test
+            for i in range(10):
+                time.sleep(1)
+                print(i, flush=True)
+                self.json_solver_request["heartbeat"] = int(datetime.datetime.now().timestamp()) 
+                cache.set(str(self.result_key), self.json_solver_request)
 
-        test_case = self.json_solver_request["parameters"]["test_case"]
-        instance = cache.get(str(self.json_solver_request["instance_key"]))
-        if test_case == "SUCCESS":
-            self._set_KV_value("SUCCESS", "No errors", instance["instance_data"]["points"])
-        elif test_case == "FAILED":
-            self._set_KV_value("FAILED", "Solver failed: ... ", None)
-        cache.set(str(self.result_key), self.json_solver_request)
+
+            type(self.result_key) 
+
+            test_case = self.json_solver_request["parameters"]["test_case"]
+            instance = cache.get(str(self.json_solver_request["instance_key"]))
+            if test_case == "SUCCESS":
+                self._set_KV_value("SUCCESS", "No errors", instance["instance_data"]["points"])
+            elif test_case == "FAILED":
+                self._set_KV_value("FAILED", "Solver failed: ... ", None)
+            cache.set(str(self.result_key), self.json_solver_request)
+        except Exception as e:
+            # log somewhere the error
+            self._set_KV_value("FAILED", repr(e), None)
+            cache.set(str(self.result_key), self.json_solver_request)
         
     def _set_KV_value(self, status, message, result):
         '''Set value in json for KV.'''
