@@ -1,4 +1,5 @@
 import io
+import os
 import base64
 import datetime
 import uuid
@@ -10,8 +11,6 @@ from multiprocessing import Process
 from flask import Flask, request, jsonify, make_response, g, send_file
 from flask_cors import CORS
 from common.extensions import cache
-import factory_solver as fs
-import validations
 
 app = Flask(__name__)
 CORS(app)
@@ -95,14 +94,11 @@ def recipe_image():
         -Not valid method:
             Error 405
     '''
-    print(request.method, flush=True)
     if request.method == 'GET':
         json_recipe_id_request = request.args
-        print(json_recipe_id_request, flush=True)
         redis_image_key = uuid.uuid3(uuid.NAMESPACE_X500, json.dumps(json_recipe_id_request))
         cached_data = cache.get(str(redis_image_key))
         if cached_data != None:
-            print("Found cache", flush=True)
             return send_file(
             io.BytesIO(cached_data),
             mimetype='image/jpeg',
@@ -110,15 +106,11 @@ def recipe_image():
             download_name='%s.jpg' % json_recipe_id_request["recipe_id"])    
         
         sql, args = createSqlQueryImage(json_recipe_id_request)
-        print(sql, flush=True)
-        print(args, flush=True)
         query_result = query_db(sql, args)
         if query_result == None:
             return make_response(jsonify({
                 "status": "400",
                 "message": "Not a valid solver request."}), 400)
-        print("query result : ", flush=True)
-        print(query_result[0].keys(), flush=True)
         keys = query_result[0].keys()
         # send_file download image 
         cache.set(str(redis_image_key), query_result[0]['image'])
@@ -157,29 +149,22 @@ def recipes_list():
         -Not valid method:
             Error 405
     '''
-    print(request.method, flush=True)
     if request.method == 'GET':
         json_recipe_list_request = request.args
-        print(json_recipe_list_request, flush=True)
         redis_recipe_list_key = uuid.uuid3(uuid.NAMESPACE_X500, json.dumps(json_recipe_list_request))
         cached_data = cache.get(str(redis_recipe_list_key))
         
         if cached_data != None:
-            print("Find cache", flush=True)
             return make_response(jsonify({
                 "status": "200",
                 "message": cached_data}), 200)
         
         sql, args = createSqlQuery(json_recipe_list_request)
-        print(sql, flush=True)
-        print(args, flush=True)
         query_result = query_db(sql, args)
         if query_result == None:
             return make_response(jsonify({
                 "status": "400",
                 "message": "Not a valid solver request."}), 400)
-        print("type query result : ", flush=True)
-        print(query_result, flush=True)
         cache.set(str(redis_recipe_list_key), query_result)
         return make_response(jsonify({
                 "status": "200",
@@ -210,10 +195,7 @@ def createSqlQuery(json_data):
     sql_courses = ""
     sql_ingredients = ""
     sql = "select * from recipe where"
-    print("json_Data", flush=True)
-    print(json_data, flush=True)
     for key in json_data:
-        print((key, json_data[key]), flush=True)
         if key == 'course':
             courses = json_data[key].split(',')
             sql_courses += ' course = ? '
@@ -240,5 +222,8 @@ def createSqlQuery(json_data):
 
 
 
-if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+#if __name__ == "__main__":
+#    app.run(debug=True, host="0.0.0.0", port=5000)
+
+port = int(os.environ.get("PORT", 5000))
+app.run(host='0.0.0.0', port=port)       
